@@ -32,24 +32,11 @@
 //
 #pragma once
 
-#include <sofa/core/behavior/ForceField.inl>
 #include <BeamAdapter/component/forcefield/AdaptiveBeamForceFieldAndMass.h>
-
-#include <sofa/core/topology/BaseMeshTopology.h>
-#include <sofa/helper/decompose.h>
-
-
-#include <sofa/core/behavior/MechanicalState.h>
-#include <sofa/defaulttype/VecTypes.h>
-#include <sofa/defaulttype/RigidTypes.h>
-#include <sofa/helper/OptionsGroup.h>
-
-#include <sofa/gl/Cylinder.h>
-#include <sofa/simulation/Simulation.h>
-#include <sofa/gl/Axis.h>
+#include <sofa/core/behavior/MultiMatrixAccessor.h>
+#include <sofa/core/MechanicalParams.h>
 #include <sofa/core/visual/VisualParams.h>
 #include <sofa/helper/ScopedAdvancedTimer.h>
-
 
 
 namespace sofa::component::forcefield
@@ -74,29 +61,28 @@ AdaptiveBeamForceFieldAndMass<DataTypes>::AdaptiveBeamForceFieldAndMass()
     , d_massDensity(initData(&d_massDensity,(Real)1.0,"massDensity", "Density of the mass (usually in kg/m^3)" ))
     , d_useShearStressComputation(initData(&d_useShearStressComputation, true, "shearStressComputation","if false, suppress the shear stress in the computation"))
     , d_reinforceLength(initData(&d_reinforceLength, false, "reinforceLength", "if true, a separate computation for the error in elongation is peformed"))
-    , d_dataG(initData(&d_dataG,"dataG","Gravity vector"))
+    , d_dataG(initData(&d_dataG,"dataG","Gravity 3d vector"))
+
     , l_interpolation(initLink("interpolation","Path to the Interpolation component on scene"))
     , l_instrumentParameters(initLink("instrumentParameters", "link to an object specifying physical parameters based on abscissa"))
 {
 }
 
-
-template <class DataTypes>
-AdaptiveBeamForceFieldAndMass<DataTypes>::~AdaptiveBeamForceFieldAndMass()
-{
-}
-
-
 template <class DataTypes>
 void AdaptiveBeamForceFieldAndMass<DataTypes>::init()
 {
+    this->d_componentState.setValue(sofa::core::objectmodel::ComponentState::Loading);
+
     if(!l_interpolation)
         l_interpolation.set(dynamic_cast<BaseContext *>(this->getContext())->get<BInterpolation>(BaseContext::Local));
 
-    if(!l_interpolation)
+    if (!l_interpolation) {
         msg_error() << "No Beam Interpolation found, the component can not work.";
+        this->d_componentState.setValue(sofa::core::objectmodel::ComponentState::Invalid);
+    }
 
     ForceField<DataTypes>::init();
+    this->d_componentState.setValue(sofa::core::objectmodel::ComponentState::Valid);
 }
 
 
@@ -110,9 +96,9 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::reinit()
 template <class DataTypes>
 void AdaptiveBeamForceFieldAndMass<DataTypes>::computeGravityVector()
 {
-    Vec3 gravity = getContext()->getGravity();
+    Vec3 gravity = this->getContext()->getGravity();
 
-    VecDeriv& _G = *d_dataG.beginEdit();
+    auto _G = sofa::helper::getWriteOnlyAccessor(d_dataG);
     _G.resize(l_interpolation->getStateSize());
 
     m_gravity = Vec3(gravity[0],gravity[1],gravity[2]);
@@ -133,8 +119,6 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::computeGravityVector()
         _G[i][4]=(Real)0.0;
         _G[i][5]=(Real)0.0;
     }
-
-    d_dataG.endEdit();
 }
 
 
@@ -149,8 +133,7 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::computeStiffness(int beam, BeamLo
     l_interpolation->getYoungModulusAtX(beam,x_curv, _E, _nu);
 
     /// material parameters
-    Real _G;
-    _G=_E/(2.0*(1.0+_nu));
+    Real _G = _E / (2.0 * (1.0 + _nu));
 
     /// interpolation & geometrical parameters
     Real _A, _L, _Iy, _Iz, _Asy, _Asz, _J;
@@ -302,7 +285,7 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::applyStiffnessLarge( VecDeriv& df
     if(nd0Id==nd1Id) /// Return in case of rigidification
         return;
 
-    Vec6 U0, U1, u0, u1, f0, f1, F0, F1;
+    Vec6NoInit U0, U1, u0, u1, f0, f1, F0, F1;
     BeamLocalMatrices &beamLocalMatrix = m_localBeamMatrices[bIndex];
 
     for (unsigned int i=0; i<6; i++)
@@ -377,7 +360,7 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::addMDx(const MechanicalParams* mp
 {
     SOFA_UNUSED(mparams);
 
-    VecDeriv& f = *dataf.beginEdit() ;
+    auto f = sofa::helper::getWriteOnlyAccessor(dataf);
     const VecDeriv& dx = datadx.getValue();
 
     unsigned int numBeams = l_interpolation->getNumBeams();
@@ -390,10 +373,8 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::addMDx(const MechanicalParams* mp
         unsigned int node0Idx, node1Idx;
         l_interpolation->getNodeIndices( b,  node0Idx, node1Idx );
 
-        applyMassLarge( f, dx, b, node0Idx, node1Idx, factor );
+        applyMassLarge( f.wref(), dx, b, node0Idx, node1Idx, factor);
     }
-
-    dataf.endEdit() ;
 }
 
 
@@ -401,7 +382,7 @@ template<class DataTypes>
 void AdaptiveBeamForceFieldAndMass<DataTypes>::addMToMatrix(const MechanicalParams *mparams,
                                                             const MultiMatrixAccessor* matrix)
 {
-    MultiMatrixAccessor::MatrixRef r = matrix->getMatrix(this->mstate);
+    MultiMatrixAccessor::MatrixRef r = matrix->getMatrix(mstate);
     Real mFact = (Real)mparams->mFactor();
 
     unsigned int numBeams = l_interpolation->getNumBeams();
@@ -413,12 +394,10 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::addMToMatrix(const MechanicalPara
         l_interpolation->getNodeIndices( b,  node0Idx, node1Idx );
 
         /// matrices in global frame
-        Matrix6x6 M00, M01, M10, M11;
-
-        M00=bLM.m_A0Ref.multTranspose( ( bLM.m_M00 * bLM.m_A0Ref  )  );
-        M01=bLM.m_A0Ref.multTranspose( ( bLM.m_M01 * bLM.m_A1Ref  )  );
-        M10=bLM.m_A1Ref.multTranspose( ( bLM.m_M10 * bLM.m_A0Ref  )  );
-        M11=bLM.m_A1Ref.multTranspose( ( bLM.m_M11 * bLM.m_A1Ref  )  );
+        Matrix6x6 M00 = bLM.m_A0Ref.multTranspose((bLM.m_M00 * bLM.m_A0Ref));
+        Matrix6x6 M01 = bLM.m_A0Ref.multTranspose((bLM.m_M01 * bLM.m_A1Ref));
+        Matrix6x6 M10 = bLM.m_A1Ref.multTranspose((bLM.m_M10 * bLM.m_A0Ref));
+        Matrix6x6 M11 = bLM.m_A1Ref.multTranspose((bLM.m_M11 * bLM.m_A1Ref));
 
         int index0[6], index1[6];
         for (int i=0;i<6;i++)
@@ -445,7 +424,7 @@ template<class DataTypes>
 void AdaptiveBeamForceFieldAndMass<DataTypes>::addMBKToMatrix(const MechanicalParams* mparams,
                                                               const MultiMatrixAccessor* matrix)
 {
-    MultiMatrixAccessor::MatrixRef r = matrix->getMatrix(this->mstate);
+    MultiMatrixAccessor::MatrixRef r = matrix->getMatrix(mstate);
     Real kFact = (Real)mparams->kFactor();
     Real mFact = (Real)mparams->mFactor();
 
@@ -467,12 +446,10 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::addMBKToMatrix(const MechanicalPa
         if(node0Idx!=node1Idx) // no rigidification
         {
             // matrices in global frame
-            Matrix6x6 K00, K01, K10, K11;
-
-            K00=bLM.m_A0Ref.multTranspose( ( bLM.m_K00 * bLM.m_A0Ref  )  );
-            K01=bLM.m_A0Ref.multTranspose( ( bLM.m_K01 * bLM.m_A1Ref  )  );
-            K10=bLM.m_A1Ref.multTranspose( ( bLM.m_K10 * bLM.m_A0Ref  )  );
-            K11=bLM.m_A1Ref.multTranspose( ( bLM.m_K11 * bLM.m_A1Ref  )  );
+            Matrix6x6 K00 = bLM.m_A0Ref.multTranspose((bLM.m_K00 * bLM.m_A0Ref));
+            Matrix6x6 K01 = bLM.m_A0Ref.multTranspose((bLM.m_K01 * bLM.m_A1Ref));
+            Matrix6x6 K10 = bLM.m_A1Ref.multTranspose((bLM.m_K10 * bLM.m_A0Ref));
+            Matrix6x6 K11 = bLM.m_A1Ref.multTranspose((bLM.m_K11 * bLM.m_A1Ref));
 
             for (int i=0;i<6;i++)
             {
@@ -487,12 +464,10 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::addMBKToMatrix(const MechanicalPa
         }
 
         // matrices in global frame
-        Matrix6x6 M00, M01, M10, M11;
-
-        M00=bLM.m_A0Ref.multTranspose( ( bLM.m_M00 * bLM.m_A0Ref  )  );
-        M01=bLM.m_A0Ref.multTranspose( ( bLM.m_M01 * bLM.m_A1Ref  )  );
-        M10=bLM.m_A1Ref.multTranspose( ( bLM.m_M10 * bLM.m_A0Ref  )  );
-        M11=bLM.m_A1Ref.multTranspose( ( bLM.m_M11 * bLM.m_A1Ref  )  );
+        Matrix6x6 M00 = bLM.m_A0Ref.multTranspose((bLM.m_M00 * bLM.m_A0Ref));
+        Matrix6x6 M01 = bLM.m_A0Ref.multTranspose((bLM.m_M01 * bLM.m_A1Ref));
+        Matrix6x6 M10 = bLM.m_A1Ref.multTranspose((bLM.m_M10 * bLM.m_A0Ref));
+        Matrix6x6 M11 = bLM.m_A1Ref.multTranspose((bLM.m_M11 * bLM.m_A1Ref));
 
         for (int i=0;i<6;i++)
         {
@@ -522,7 +497,7 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::addForce (const MechanicalParams*
     ScopedAdvancedTimer timer("AdaptiveBeamForceFieldAndMass_addForce");
     SOFA_UNUSED(v);
 
-    VecDeriv& f = *dataf.beginEdit() ;
+    auto f = sofa::helper::getWriteOnlyAccessor(dataf);
     const VecCoord& x = datax.getValue();
 
     f.resize(x.size()); // current content of the vector will remain the same (http://www.cplusplus.com/reference/vector/vector/resize/)
@@ -614,7 +589,7 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::addForce (const MechanicalParams*
         SpatialVector u1 = local_H_local1.CreateSpatialVector() - local_H_local1_rest.CreateSpatialVector();
 
         /// 3. put the result in a Vec6
-        Vec6 U0local, U1local;
+        Vec6NoInit U0local, U1local;
 
         for (unsigned int i=0; i<3; i++)
         {
@@ -676,7 +651,6 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::addForce (const MechanicalParams*
         /// add gravity:
         addMDx(mparams, dataf, d_dataG, 1.0);
     }
-    dataf.endEdit() ;
 }
 
 
@@ -684,7 +658,7 @@ template<class DataTypes>
 void AdaptiveBeamForceFieldAndMass<DataTypes>::addDForce(const MechanicalParams* mparams,
                                                          DataVecDeriv& datadF, const DataVecDeriv& datadX )
 {
-    VecDeriv& df = *datadF.beginEdit();
+    auto df = sofa::helper::getWriteOnlyAccessor(datadF);
     const VecDeriv& dx = datadX.getValue();
     const double kFactor = mparams->kFactor();
 
@@ -697,10 +671,8 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::addDForce(const MechanicalParams*
         unsigned int node0Idx, node1Idx;
         l_interpolation->getNodeIndices( b,  node0Idx, node1Idx );
 
-        applyStiffnessLarge( df, dx, b, node0Idx, node1Idx, kFactor );
+        applyStiffnessLarge( df.wref(), dx, b, node0Idx, node1Idx, kFactor);
     }
-
-    datadF.endEdit();
 }
 
 
@@ -724,11 +696,10 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::addKToMatrix(const MechanicalPara
             continue;
 
         // matrices in global frame
-        Matrix6x6 K00, K01, K10, K11;
-        K00=beamLocalMatrix.m_A0Ref.multTranspose( ( beamLocalMatrix.m_K00 * beamLocalMatrix.m_A0Ref  )  );
-        K01=beamLocalMatrix.m_A0Ref.multTranspose( ( beamLocalMatrix.m_K01 * beamLocalMatrix.m_A1Ref  )  );
-        K10=beamLocalMatrix.m_A1Ref.multTranspose( ( beamLocalMatrix.m_K10 * beamLocalMatrix.m_A0Ref  )  );
-        K11=beamLocalMatrix.m_A1Ref.multTranspose( ( beamLocalMatrix.m_K11 * beamLocalMatrix.m_A1Ref  )  );
+        Matrix6x6 K00 = beamLocalMatrix.m_A0Ref.multTranspose((beamLocalMatrix.m_K00 * beamLocalMatrix.m_A0Ref));
+        Matrix6x6 K01 = beamLocalMatrix.m_A0Ref.multTranspose((beamLocalMatrix.m_K01 * beamLocalMatrix.m_A1Ref));
+        Matrix6x6 K10 = beamLocalMatrix.m_A1Ref.multTranspose((beamLocalMatrix.m_K10 * beamLocalMatrix.m_A0Ref));
+        Matrix6x6 K11 = beamLocalMatrix.m_A1Ref.multTranspose((beamLocalMatrix.m_K11 * beamLocalMatrix.m_A1Ref));
 
         int index0[6], index1[6];
         for (int i=0;i<6;i++)
@@ -761,6 +732,8 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::draw(const VisualParams *vparams)
     if (!vparams->displayFlags().getShowForceFields() && !vparams->displayFlags().getShowBehaviorModels()) return;
     if (!mstate) return;
 
+    vparams->drawTool()->saveLastState();
+
     ReadAccessor<Data<VecCoord> > x = mstate->read(ConstVecCoordId::position()) ;
 
     unsigned int numBeams = l_interpolation->getNumBeams();
@@ -779,7 +752,7 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::draw(const VisualParams *vparams)
         if(vparams->displayFlags().getShowForceFields())
         {
             // /  test ///
-            vector<Vector3> points;
+            type::vector<Vector3> points;
             Vec3 pos = globalH0Local.getOrigin();
             for (double i=0.0; i<1.00001; i+=0.02)
             {
@@ -819,9 +792,9 @@ void AdaptiveBeamForceFieldAndMass<DataTypes>::draw(const VisualParams *vparams)
             vparams->drawTool()->drawArrow(P1,P1 + y, radius_arrow, sofa::type::RGBAColor(1,0,0,1));
             vparams->drawTool()->drawArrow(P1,P1 + z, radius_arrow, sofa::type::RGBAColor(1,0,0,1));
         }
-
     }
 
+    vparams->drawTool()->restoreLastState();
 }
 
 
