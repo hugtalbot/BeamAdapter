@@ -192,6 +192,7 @@ public:
         return 0; 
     }
 
+    using sofa::core::behavior::ForceField<DataTypes>::addKToMatrix;
     void addKToMatrix(const MechanicalParams* mparams,
                       const MultiMatrixAccessor* matrix) override;
 
